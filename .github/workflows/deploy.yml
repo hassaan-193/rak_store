@@ -5,40 +5,219 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-store
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  # ---------------------------------------------------------------
+  # 1) TEST: nothing is deployed unless this passes
+  # ---------------------------------------------------------------
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
+          extensions: mbstring, pdo_mysql, xml, curl, zip, gd, bcmath, intl
           tools: composer:v2
 
-      - name: Install PHP dependencies
+      - name: Validate composer files
+        run: composer validate --no-check-publish
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: PHP syntax check
+        run: |
+          if find app routes config database bootstrap -name '*.php' -print0 \
+             | xargs -0 -n1 php -l 2>&1 | grep -v '^No syntax errors'; then
+            echo "Syntax errors found"; exit 1
+          fi
+
+      - name: Application boots
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+          php artisan route:list > /dev/null
+
+      - name: Run test suite (enable with repo variable RUN_TESTS=true)
+        if: vars.RUN_TESTS == 'true'
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ':memory:'
+        run: php artisan test
+
+  # ---------------------------------------------------------------
+  # 2) DEPLOY: backup -> maintenance -> upload -> migrate -> health check
+  #    any failure after the backup restores files (and DB if touched)
+  # ---------------------------------------------------------------
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      HEALTH_URL: ${{ secrets.HEALTH_URL }}
+      KEEP_BACKUPS: '7'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pdo_mysql, xml, curl, zip, gd, bcmath, intl
+          tools: composer:v2
+
+      - name: Build production dependencies
         run: composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
 
       - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          {
+            echo "Host target"
+            echo "  HostName $SSH_HOST"
+            echo "  User $SSH_USER"
+            echo "  Port $SSH_PORT"
+            echo "  IdentityFile ~/.ssh/id_deploy"
+            echo "  BatchMode yes"
+            echo "  ServerAliveInterval 30"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          echo "TS=$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Server pre-flight checks
+        run: |
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -e
+          cd "$DEPLOY_PATH"
+          test -f artisan  || { echo "artisan not found in DEPLOY_PATH"; exit 1; }
+          test -f .env     || { echo ".env missing on the server"; exit 1; }
+          php -r 'exit(version_compare(PHP_VERSION, "8.0.0", ">=") ? 0 : 1);' || { echo "Server PHP is too old: $(php -v | head -1)"; exit 1; }
+          command -v mysqldump >/dev/null || { echo "mysqldump not available"; exit 1; }
+          command -v mysql >/dev/null     || { echo "mysql client not available"; exit 1; }
+          echo "Free space:"; df -h "$DEPLOY_PATH" | tail -1
+          REMOTE
+
+      - name: Backup database and project folder (on the server)
+        run: |
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' TS='$TS' bash -s" <<'REMOTE'
+          set -e
+          umask 077
+          cd "$DEPLOY_PATH"
+          B="$HOME/backups/store/$TS"
+          mkdir -p "$B"
+
+          envval() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"; }
+          DBH=$(envval DB_HOST); DBP=$(envval DB_PORT); DBN=$(envval DB_DATABASE)
+          DBU=$(envval DB_USERNAME); DBW=$(envval DB_PASSWORD)
+
+          echo "Dumping database $DBN ..."
+          MYSQL_PWD="$DBW" mysqldump -h "${DBH:-localhost}" -P "${DBP:-3306}" -u "$DBU" \
+            --single-transaction --routines --triggers --no-tablespaces "$DBN" | gzip > "$B/db.sql.gz"
+          gzip -t "$B/db.sql.gz"
+          test "$(stat -c %s "$B/db.sql.gz")" -gt 500 || { echo "DB dump looks empty"; exit 1; }
+
+          echo "Archiving project folder ..."
+          tar -czf "$B/files.tar.gz" \
+            --exclude='./storage/logs' --exclude='./storage/framework/cache' \
+            --exclude='./storage/framework/sessions' --exclude='./storage/framework/views' \
+            -C "$DEPLOY_PATH" .
+          tar -tzf "$B/files.tar.gz" > /dev/null
+
+          echo "Backup OK: $B"; ls -lh "$B"
+
+          # keep only the newest N backups
+          cd "$HOME/backups/store" && ls -1dt */ | tail -n +$((${KEEP_BACKUPS:-7} + 1)) | xargs -r rm -rf
+          REMOTE
+          echo "BACKUP_DONE=true" >> "$GITHUB_ENV"
+
+      - name: Enable maintenance mode
+        run: |
+          echo "FILES_TOUCHED=true" >> "$GITHUB_ENV"
+          ssh target "cd '$DEPLOY_PATH' && php artisan down --retry=60 || true"
 
       - name: Upload files
         run: |
-          rsync -az --delete \
+          rsync -az \
             --exclude='.git' --exclude='.github' --exclude='.env' \
             --exclude='storage/' --exclude='node_modules/' --exclude='tests/' \
-            -e "ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT }}" \
-            ./ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}/"
+            --exclude='public/storage' --exclude='.user.ini' \
+            -e "ssh -F $HOME/.ssh/config" \
+            ./ "target:$DEPLOY_PATH/"
 
       - name: Migrate and clear caches
         run: |
-          ssh -i ~/.ssh/id_deploy -p ${{ secrets.SSH_PORT }} "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH }} && php artisan migrate --force && php artisan config:clear && php artisan view:clear && php artisan route:clear && php artisan config:cache"
+          echo "DB_TOUCHED=true" >> "$GITHUB_ENV"
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          set -e
+          cd "$DEPLOY_PATH"
+          php artisan migrate --force
+          php artisan optimize:clear
+          php artisan config:cache
+          php artisan view:cache
+          php artisan queue:restart || true
+          REMOTE
+
+      - name: Disable maintenance mode
+        run: ssh target "cd '$DEPLOY_PATH' && php artisan up"
+
+      - name: Health check
+        run: |
+          if [ -z "$HEALTH_URL" ]; then echo "HEALTH_URL secret not set - skipping HTTP check"; exit 0; fi
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$HEALTH_URL" || echo 000)
+            echo "attempt $i: HTTP $code"
+            if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then exit 0; fi
+            sleep 10
+          done
+          echo "Health check failed"; exit 1
+
+      # ---- automatic rollback --------------------------------------
+      - name: ROLLBACK - restore files and database from backup
+        if: failure() && env.BACKUP_DONE == 'true' && env.FILES_TOUCHED == 'true'
+        run: |
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' TS='$TS' DB_TOUCHED='${DB_TOUCHED:-false}' bash -s" <<'REMOTE'
+          set -e
+          B="$HOME/backups/store/$TS"
+          cd "$DEPLOY_PATH"
+          php artisan down --retry=60 || true
+
+          echo "Restoring files from $B/files.tar.gz ..."
+          tar -xzf "$B/files.tar.gz" -C "$DEPLOY_PATH" --exclude='./.env'
+
+          if [ "$DB_TOUCHED" = "true" ]; then
+            envval() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"; }
+            DBH=$(envval DB_HOST); DBP=$(envval DB_PORT); DBN=$(envval DB_DATABASE)
+            DBU=$(envval DB_USERNAME); DBW=$(envval DB_PASSWORD)
+            echo "Restoring database $DBN ..."
+            gunzip -c "$B/db.sql.gz" | MYSQL_PWD="$DBW" mysql -h "${DBH:-localhost}" -P "${DBP:-3306}" -u "$DBU" "$DBN"
+          else
+            echo "Database was not touched - not restoring it."
+          fi
+
+          php artisan optimize:clear || true
+          php artisan config:cache || true
+          php artisan up
+          echo "ROLLBACK COMPLETE - the previous version is live again."
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
