@@ -36,6 +36,9 @@ jobs:
       - name: Validate composer files
         run: composer validate --no-check-publish
 
+      - name: Create Laravel runtime folders (not stored in git)
+        run: mkdir -p storage/logs storage/framework/{cache/data,sessions,views} storage/app/public bootstrap/cache
+
       - name: Install dependencies
         run: composer install --no-interaction --prefer-dist
 
@@ -83,6 +86,9 @@ jobs:
           php-version: '8.3'
           extensions: mbstring, pdo_mysql, xml, curl, zip, gd, bcmath, intl
           tools: composer:v2
+
+      - name: Create Laravel runtime folders (not stored in git)
+        run: mkdir -p storage/logs storage/framework/{cache/data,sessions,views} storage/app/public bootstrap/cache
 
       - name: Build production dependencies
         run: composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
