@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: test + SSH + backup + list changes, but deploy nothing'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -148,12 +153,25 @@ jobs:
           REMOTE
           echo "BACKUP_DONE=true" >> "$GITHUB_ENV"
 
+      - name: DRY RUN - show what would be uploaded (nothing is changed)
+        if: inputs.dry_run == true
+        run: |
+          rsync -azn --itemize-changes \
+            --exclude='.git' --exclude='.github' --exclude='.env' \
+            --exclude='storage/' --exclude='node_modules/' --exclude='tests/' \
+            --exclude='public/storage' --exclude='.user.ini' \
+            -e "ssh -F $HOME/.ssh/config" \
+            ./ "target:$DEPLOY_PATH/" | head -100
+          echo "Dry run finished: backup was created and verified; no files, database or site mode were changed."
+
       - name: Enable maintenance mode
+        if: inputs.dry_run != true
         run: |
           echo "FILES_TOUCHED=true" >> "$GITHUB_ENV"
           ssh target "cd '$DEPLOY_PATH' && php artisan down --retry=60 || true"
 
       - name: Upload files
+        if: inputs.dry_run != true
         run: |
           rsync -az \
             --exclude='.git' --exclude='.github' --exclude='.env' \
@@ -163,6 +181,7 @@ jobs:
             ./ "target:$DEPLOY_PATH/"
 
       - name: Migrate and clear caches
+        if: inputs.dry_run != true
         run: |
           echo "DB_TOUCHED=true" >> "$GITHUB_ENV"
           ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
@@ -176,9 +195,11 @@ jobs:
           REMOTE
 
       - name: Disable maintenance mode
+        if: inputs.dry_run != true
         run: ssh target "cd '$DEPLOY_PATH' && php artisan up"
 
       - name: Health check
+        if: inputs.dry_run != true
         run: |
           if [ -z "$HEALTH_URL" ]; then echo "HEALTH_URL secret not set - skipping HTTP check"; exit 0; fi
           for i in 1 2 3 4 5 6; do
