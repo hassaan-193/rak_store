@@ -51,18 +51,19 @@ jobs:
 
           echo "Dropping all current tables/views in $DBN ..."
           { echo "SET FOREIGN_KEY_CHECKS=0;"
-            M -N -e "SELECT CONCAT('DROP VIEW IF EXISTS \`',table_name,'\`;') FROM information_schema.views WHERE table_schema=DATABASE()"
-            M -N -e "SELECT CONCAT('DROP TABLE IF EXISTS \`',table_name,'\`;') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'"
+            M -N -e "SELECT CONCAT('DROP VIEW IF EXISTS \`',table_name,'\`;') FROM information_schema.views WHERE table_schema=DATABASE()" "$DBN"
+            M -N -e "SELECT CONCAT('DROP TABLE IF EXISTS \`',table_name,'\`;') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'" "$DBN"
           } | M "$DBN"
 
           echo "Importing database from backup ..."
           gunzip -c "$B/db.sql.gz" | M "$DBN"
 
           echo "Restoring files (exact copy, .env and storage kept) ..."
-          T=$(mktemp -d); tar -xzf "$B/files.tar.gz" -C "$T"
+          T=$(mktemp -d); tar -xzf "$B/files.tar.gz" -C "$T"; chmod 755 "$T"
           rsync -a --delete --exclude='/.env' --exclude='/storage/' "$T"/ "$DEPLOY_PATH"/
+          chmod 755 "$DEPLOY_PATH"
           rm -rf "$T"
-          rm -f storage/framework/down storage/framework/views/*.php
+          rm -f storage/framework/down storage/framework/views/*.php bootstrap/cache/*.php
           echo "RESTORE DONE"
           REMOTE
 
