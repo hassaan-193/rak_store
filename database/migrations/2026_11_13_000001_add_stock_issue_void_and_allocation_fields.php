@@ -13,22 +13,32 @@ class AddStockIssueVoidAndAllocationFields extends Migration
 {
     public function up()
     {
-        Schema::table('po_receipt_entries', function (Blueprint $table) {
-            $table->json('stock_issue_details')->nullable();
-            $table->string('submission_uuid', 64)->nullable();
-            $table->unique(['portal_order_id', 'submission_uuid'], 'po_receipt_entries_po_submission_unique');
-        });
+        if (! Schema::hasColumn('po_receipt_entries', 'stock_issue_details')) {
+            Schema::table('po_receipt_entries', function (Blueprint $table) {
+                $table->json('stock_issue_details')->nullable();
+            });
+        }
+        if (! Schema::hasColumn('po_receipt_entries', 'submission_uuid')) {
+            Schema::table('po_receipt_entries', function (Blueprint $table) {
+                $table->string('submission_uuid', 64)->nullable();
+                $table->unique(['portal_order_id', 'submission_uuid'], 'po_receipt_entries_po_submission_unique');
+            });
+        }
 
-        Schema::table('portal_orders', function (Blueprint $table) {
-            $table->timestamp('voided_at')->nullable();
-            $table->text('void_reason')->nullable();
-            $table->string('voided_by_name')->nullable();
-        });
+        if (! Schema::hasColumn('portal_orders', 'voided_at')) {
+            Schema::table('portal_orders', function (Blueprint $table) {
+                $table->timestamp('voided_at')->nullable();
+                $table->text('void_reason')->nullable();
+                $table->string('voided_by_name')->nullable();
+            });
+        }
 
-        Schema::table('outgoing_material_items', function (Blueprint $table) {
-            $table->json('stock_allocations')->nullable();
-            $table->timestamp('allocations_reversed_at')->nullable();
-        });
+        if (! Schema::hasColumn('outgoing_material_items', 'stock_allocations')) {
+            Schema::table('outgoing_material_items', function (Blueprint $table) {
+                $table->json('stock_allocations')->nullable();
+                $table->timestamp('allocations_reversed_at')->nullable();
+            });
+        }
     }
 
     public function down()

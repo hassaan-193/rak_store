@@ -8,6 +8,9 @@ class AddDispatchFieldsToPortalOrders extends Migration
 {
     public function up()
     {
+        if (Schema::hasColumn('portal_orders', 'site_name')) {
+            return;
+        }
         Schema::table('portal_orders', function (Blueprint $table) {
             // Where to deliver, as confirmed by the portal user on "Dispatch".
             $table->string('site_name')->nullable()->after('project_id');

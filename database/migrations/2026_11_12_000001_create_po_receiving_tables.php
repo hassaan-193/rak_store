@@ -9,6 +9,9 @@ class CreatePoReceivingTables extends Migration
 {
     public function up()
     {
+        $newLegacyColumns = ! Schema::hasColumn('portal_orders', 'legacy_flow');
+
+        if (! Schema::hasTable('portal_order_lines')) {
         Schema::create('portal_order_lines', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('portal_order_id');
@@ -21,8 +24,10 @@ class CreatePoReceivingTables extends Migration
             $table->foreign('portal_order_id')->references('id')->on('portal_orders');
             $table->index('portal_order_id');
         });
+        }
 
         // Delivery log. Rows are never deleted, only voided (no SoftDeletes, no cascade).
+        if (! Schema::hasTable('po_receipt_entries')) {
         Schema::create('po_receipt_entries', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('portal_order_id');
@@ -46,22 +51,37 @@ class CreatePoReceivingTables extends Migration
             $table->foreign('portal_order_line_id')->references('id')->on('portal_order_lines');
             $table->index(['portal_order_id', 'voided_at']);
         });
+        }
 
-        Schema::table('portal_orders', function (Blueprint $table) {
-            $table->unsignedBigInteger('event_seq')->default(0);
-            $table->boolean('legacy_flow')->default(0);
-        });
+        if (! Schema::hasColumn('portal_orders', 'event_seq')) {
+            Schema::table('portal_orders', function (Blueprint $table) {
+                $table->unsignedBigInteger('event_seq')->default(0);
+            });
+        }
+        if (! Schema::hasColumn('portal_orders', 'legacy_flow')) {
+            Schema::table('portal_orders', function (Blueprint $table) {
+                $table->boolean('legacy_flow')->default(0);
+            });
+        }
 
-        Schema::table('incoming_materials', function (Blueprint $table) {
-            $table->unsignedBigInteger('portal_order_id')->nullable();
-        });
+        if (! Schema::hasColumn('incoming_materials', 'portal_order_id')) {
+            Schema::table('incoming_materials', function (Blueprint $table) {
+                $table->unsignedBigInteger('portal_order_id')->nullable();
+            });
+        }
 
         // Data step: orders the old dispatch flow already delivered are kept as "legacy"
         // (no entries are invented); everything else waits for receipts.
-        DB::table('portal_orders')->where('status', 'delivered')->update(['legacy_flow' => 1]);
-        DB::table('portal_orders')->whereIn('status', ['awaiting_dispatch', 'received', 'scheduled', 'driver_assigned', 'collected'])->update(['status' => 'received']);
+        // Skipped when the columns already existed (data step was done before).
+        if ($newLegacyColumns) {
+            DB::table('portal_orders')->where('status', 'delivered')->update(['legacy_flow' => 1]);
+            DB::table('portal_orders')->whereIn('status', ['awaiting_dispatch', 'received', 'scheduled', 'driver_assigned', 'collected'])->update(['status' => 'received']);
+        }
 
         foreach (DB::table('portal_orders')->get() as $order) {
+            if (DB::table('portal_order_lines')->where('portal_order_id', $order->id)->exists()) {
+                continue;
+            }
             $items = json_decode($order->items ?: '[]', true) ?: [];
             foreach ($items as $item) {
                 if (empty($item['material_name'])) {
