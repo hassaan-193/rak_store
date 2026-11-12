@@ -187,15 +187,15 @@ jobs:
             --exclude='.git' --exclude='.github' --exclude='.env' \
             --exclude='storage/' --exclude='node_modules/' --exclude='tests/' \
             --exclude='public/storage' --exclude='.user.ini' \
-            --exclude='.env.*'
-            --exclude='php.ini'
-            --exclude='error_log'
-            --exclude='*.log'
-            --exclude='.well-known/'
-            --exclude='cgi-bin/'
-            --exclude='bootstrap/cache/*.php'
-            --exclude='*.sql'
-            --exclude='public/uploads/'
+            --exclude='.env.*' \
+            --exclude='php.ini' \
+            --exclude='error_log' \
+            --exclude='*.log' \
+            --exclude='.well-known/' \
+            --exclude='cgi-bin/' \
+            --exclude='bootstrap/cache/*.php' \
+            --exclude='*.sql' \
+            --exclude='public/uploads/' \
             -e "ssh -F $HOME/.ssh/config" \
             ./ "target:$DEPLOY_PATH/"
           ssh target "chmod 755 '$DEPLOY_PATH' '$DEPLOY_PATH/artisan'"
