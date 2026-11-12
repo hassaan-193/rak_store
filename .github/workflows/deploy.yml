@@ -233,8 +233,9 @@ jobs:
           mkdir -p storage/framework && echo '{}' > storage/framework/down
 
           echo "Restoring files (exact copy of the backup; .env and storage kept) ..."
-          T=$(mktemp -d); tar -xzf "$B/files.tar.gz" -C "$T"
+          T=$(mktemp -d); tar -xzf "$B/files.tar.gz" -C "$T"; chmod 755 "$T"
           rsync -a --delete --exclude='/.env' --exclude='/storage/' "$T"/ "$DEPLOY_PATH"/
+          chmod 755 "$DEPLOY_PATH"
           rm -rf "$T"
           rm -f bootstrap/cache/*.php storage/framework/views/*.php
 
