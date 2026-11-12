@@ -1,8 +1,6 @@
 name: Deploy Store
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -183,12 +181,13 @@ jobs:
       - name: Upload files
         if: inputs.dry_run != true
         run: |
-          rsync -az \
+          rsync -rlptz --chmod=D755,F644 \
             --exclude='.git' --exclude='.github' --exclude='.env' \
             --exclude='storage/' --exclude='node_modules/' --exclude='tests/' \
             --exclude='public/storage' --exclude='.user.ini' \
             -e "ssh -F $HOME/.ssh/config" \
             ./ "target:$DEPLOY_PATH/"
+          ssh target "chmod 755 '$DEPLOY_PATH' '$DEPLOY_PATH/artisan'"
 
       - name: Migrate and clear caches
         if: inputs.dry_run != true
