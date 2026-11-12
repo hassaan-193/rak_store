@@ -8,6 +8,8 @@ class CreatePortalIntegrationTables extends Migration
 {
     public function up()
     {
+        // tables may already exist on servers set up before migrations were tracked
+        if (! Schema::hasTable('portal_orders')) {
         Schema::create('portal_orders', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('portal_po_id')->unique();
@@ -33,7 +35,9 @@ class CreatePortalIntegrationTables extends Migration
 
             $table->foreign('driver_id')->references('id')->on('drivers')->nullOnDelete();
         });
+        }
 
+        if (! Schema::hasTable('integration_messages')) {
         Schema::create('integration_messages', function (Blueprint $table) {
             $table->id();
             $table->string('direction', 3); // in / out
@@ -49,6 +53,7 @@ class CreatePortalIntegrationTables extends Migration
 
             $table->unique(['direction', 'message_id']);
         });
+        }
     }
 
     public function down()
