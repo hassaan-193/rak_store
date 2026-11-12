@@ -113,6 +113,9 @@ jobs:
           chmod 600 ~/.ssh/config
           echo "TS=$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
+      - name: Debug - key fingerprint
+        run: ssh-keygen -lf ~/.ssh/id_deploy || echo "KEY IS NOT A VALID KEY FILE"
+
       - name: Server pre-flight checks
         run: |
           ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
