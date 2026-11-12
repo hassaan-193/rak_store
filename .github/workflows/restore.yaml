@@ -1,0 +1,75 @@
+name: Restore Store from backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup:
+        description: 'Backup folder name under ~/backups/store/'
+        required: true
+        default: '20261112-084729-56d629b'
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      HEALTH_URL: ${{ secrets.HEALTH_URL }}
+      BACKUP: ${{ inputs.backup }}
+    steps:
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_deploy\n  BatchMode yes\n' "$SSH_HOST" "$SSH_USER" "$SSH_PORT" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Full clean restore (files + database)
+        run: |
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' BACKUP='$BACKUP' bash -s" <<'REMOTE'
+          set -e
+          B="$HOME/backups/store/$BACKUP"
+          test -f "$B/files.tar.gz" && test -f "$B/db.sql.gz" || { echo "Backup $BACKUP not found"; ls -1 "$HOME/backups/store"; exit 1; }
+          gzip -t "$B/db.sql.gz"; tar -tzf "$B/files.tar.gz" > /dev/null
+          cd "$DEPLOY_PATH"
+
+          envval() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"; }
+          DBH=$(envval DB_HOST); DBP=$(envval DB_PORT); DBN=$(envval DB_DATABASE)
+          DBU=$(envval DB_USERNAME); DBW=$(envval DB_PASSWORD)
+          M() { MYSQL_PWD="$DBW" mysql -h "${DBH:-localhost}" -P "${DBP:-3306}" -u "$DBU" "$@"; }
+
+          echo "Safety snapshot of the CURRENT database ..."
+          SNAP="$HOME/backups/store/before-restore-$BACKUP"; mkdir -p "$SNAP"
+          MYSQL_PWD="$DBW" mysqldump -h "${DBH:-localhost}" -P "${DBP:-3306}" -u "$DBU" --single-transaction --no-tablespaces "$DBN" | gzip > "$SNAP/db.sql.gz"
+
+          echo "Dropping all current tables/views in $DBN ..."
+          { echo "SET FOREIGN_KEY_CHECKS=0;"
+            M -N -e "SELECT CONCAT('DROP VIEW IF EXISTS \`',table_name,'\`;') FROM information_schema.views WHERE table_schema=DATABASE()"
+            M -N -e "SELECT CONCAT('DROP TABLE IF EXISTS \`',table_name,'\`;') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'"
+          } | M "$DBN"
+
+          echo "Importing database from backup ..."
+          gunzip -c "$B/db.sql.gz" | M "$DBN"
+
+          echo "Restoring files (exact copy, .env and storage kept) ..."
+          T=$(mktemp -d); tar -xzf "$B/files.tar.gz" -C "$T"
+          rsync -a --delete --exclude='/.env' --exclude='/storage/' "$T"/ "$DEPLOY_PATH"/
+          rm -rf "$T"
+          rm -f storage/framework/down storage/framework/views/*.php
+          echo "RESTORE DONE"
+          REMOTE
+
+      - name: Test the site
+        run: |
+          curl -s -o /dev/null -w 'site HTTP %{http_code}\n' --max-time 20 -A "Mozilla/5.0 Chrome/120" "$HEALTH_URL"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
