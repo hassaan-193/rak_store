@@ -1,0 +1,42 @@
+name: DB check (read only)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+    steps:
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_deploy\n  BatchMode yes\n' "$SSH_HOST" "$SSH_USER" "$SSH_PORT" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Show migrations and portal tables
+        run: |
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          cd "$DEPLOY_PATH"
+          envval() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"; }
+          M() { MYSQL_PWD="$(envval DB_PASSWORD)" mysql -h "$(envval DB_HOST)" -u "$(envval DB_USERNAME)" "$(envval DB_DATABASE)" "$@"; }
+          echo "--- recorded 2026 migrations"; M -N -e "SELECT migration FROM migrations WHERE migration LIKE '2026%' ORDER BY migration"
+          echo "--- tables"; M -N -e "SHOW TABLES LIKE 'portal%'; SHOW TABLES LIKE 'po_%'; SHOW TABLES LIKE 'integration%'"
+          echo "--- portal_orders columns"; M -N -e "SHOW COLUMNS FROM portal_orders" | cut -f1 | tr '\n' ' '
+          echo; echo "--- incoming_materials / outgoing_material_items extra cols"
+          M -N -e "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name IN ('incoming_materials','outgoing_material_items','po_receipt_entries') AND (column_name LIKE 'portal%' OR column_name LIKE '%void%' OR column_name LIKE '%alloc%' OR column_name LIKE 'deleted%')"
+          REMOTE
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
