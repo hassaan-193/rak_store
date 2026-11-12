@@ -1,0 +1,49 @@
+name: Fix permissions
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      HEALTH_URL: ${{ secrets.HEALTH_URL }}
+    steps:
+      - name: Set up SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts
+          printf 'Host target\n  HostName %s\n  User %s\n  Port %s\n  IdentityFile ~/.ssh/id_deploy\n  BatchMode yes\n' "$SSH_HOST" "$SSH_USER" "$SSH_PORT" > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Fix permissions and show state
+        run: |
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          cd "$DEPLOY_PATH"
+          echo "--- before"; ls -ld "$DEPLOY_PATH" "$DEPLOY_PATH/public" "$DEPLOY_PATH/public/.htaccess"
+          find . -path ./storage -prune -o -type d -exec chmod 755 {} +
+          find . -path ./storage -prune -o -type f -exec chmod 644 {} +
+          chmod 755 artisan 2>/dev/null || true
+          chmod -R u+rwX,g+rX,o+rX storage
+          chmod -R 775 storage bootstrap/cache
+          chmod 600 .env
+          rm -f storage/framework/down
+          echo "--- after"; ls -ld "$DEPLOY_PATH" "$DEPLOY_PATH/public" "$DEPLOY_PATH/public/.htaccess"
+          echo "--- last log lines"; tail -n 15 storage/logs/laravel.log 2>/dev/null || true
+          REMOTE
+
+      - name: Test the site
+        run: curl -s -o /dev/null -w 'site HTTP %{http_code}\n' --max-time 20 -A "Mozilla/5.0 Chrome/120" "$HEALTH_URL"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/id_deploy
