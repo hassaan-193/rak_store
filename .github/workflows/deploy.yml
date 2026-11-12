@@ -78,6 +78,8 @@ jobs:
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       HEALTH_URL: ${{ secrets.HEALTH_URL }}
       KEEP_BACKUPS: '7'
+      # PHP 8.3 is used only inside the deploy SSH sessions; the server default (7.4) is untouched
+      PHP_DIR: /opt/cpanel/ea-php83/root/usr/bin
     steps:
       - uses: actions/checkout@v4
 
@@ -113,17 +115,16 @@ jobs:
           chmod 600 ~/.ssh/config
           echo "TS=$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
 
-      - name: Debug - key fingerprint
-        run: ssh-keygen -lf ~/.ssh/id_deploy || echo "KEY IS NOT A VALID KEY FILE"
-
       - name: Server pre-flight checks
         run: |
-          ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' PHP_DIR='$PHP_DIR' bash -s" <<'REMOTE'
           set -e
+          export PATH="$PHP_DIR:$PATH"
           cd "$DEPLOY_PATH"
           test -f artisan  || { echo "artisan not found in DEPLOY_PATH"; exit 1; }
           test -f .env     || { echo ".env missing on the server"; exit 1; }
-          php -r 'exit(version_compare(PHP_VERSION, "8.0.0", ">=") ? 0 : 1);' || { echo "Server PHP is too old: $(php -v | head -1)"; exit 1; }
+          php -r 'exit(version_compare(PHP_VERSION, "8.0.0", ">=") ? 0 : 1);' || { echo "PHP is too old: $(php -v | head -1)"; exit 1; }
+          echo "Using $(php -v | head -1)"
           command -v mysqldump >/dev/null || { echo "mysqldump not available"; exit 1; }
           command -v mysql >/dev/null     || { echo "mysql client not available"; exit 1; }
           echo "Free space:"; df -h "$DEPLOY_PATH" | tail -1
@@ -131,7 +132,7 @@ jobs:
 
       - name: Backup database and project folder (on the server)
         run: |
-          ssh target "DEPLOY_PATH='$DEPLOY_PATH' TS='$TS' bash -s" <<'REMOTE'
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' TS='$TS' KEEP_BACKUPS='$KEEP_BACKUPS' bash -s" <<'REMOTE'
           set -e
           umask 077
           cd "$DEPLOY_PATH"
@@ -177,7 +178,7 @@ jobs:
         if: inputs.dry_run != true
         run: |
           echo "FILES_TOUCHED=true" >> "$GITHUB_ENV"
-          ssh target "cd '$DEPLOY_PATH' && php artisan down --retry=60 || true"
+          ssh target "export PATH='$PHP_DIR':\$PATH; cd '$DEPLOY_PATH' && php artisan down --retry=60 || true"
 
       - name: Upload files
         if: inputs.dry_run != true
@@ -193,8 +194,9 @@ jobs:
         if: inputs.dry_run != true
         run: |
           echo "DB_TOUCHED=true" >> "$GITHUB_ENV"
-          ssh target "DEPLOY_PATH='$DEPLOY_PATH' bash -s" <<'REMOTE'
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' PHP_DIR='$PHP_DIR' bash -s" <<'REMOTE'
           set -e
+          export PATH="$PHP_DIR:$PATH"
           cd "$DEPLOY_PATH"
           php artisan migrate --force
           php artisan optimize:clear
@@ -205,7 +207,7 @@ jobs:
 
       - name: Disable maintenance mode
         if: inputs.dry_run != true
-        run: ssh target "cd '$DEPLOY_PATH' && php artisan up"
+        run: ssh target "export PATH='$PHP_DIR':\$PATH; cd '$DEPLOY_PATH' && php artisan up"
 
       - name: Health check
         if: inputs.dry_run != true
@@ -223,8 +225,9 @@ jobs:
       - name: ROLLBACK - restore files and database from backup
         if: failure() && env.BACKUP_DONE == 'true' && env.FILES_TOUCHED == 'true'
         run: |
-          ssh target "DEPLOY_PATH='$DEPLOY_PATH' TS='$TS' DB_TOUCHED='${DB_TOUCHED:-false}' bash -s" <<'REMOTE'
+          ssh target "DEPLOY_PATH='$DEPLOY_PATH' PHP_DIR='$PHP_DIR' TS='$TS' DB_TOUCHED='${DB_TOUCHED:-false}' bash -s" <<'REMOTE'
           set -e
+          export PATH="$PHP_DIR:$PATH"
           B="$HOME/backups/store/$TS"
           cd "$DEPLOY_PATH"
           php artisan down --retry=60 || true
