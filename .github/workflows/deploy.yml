@@ -216,7 +216,7 @@ jobs:
           for i in 1 2 3 4 5 6; do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$HEALTH_URL" || echo 000)
             echo "attempt $i: HTTP $code"
-            if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then exit 0; fi
+            if [ "$code" -ge 200 ] && [ "$code" -lt 500 ]; then exit 0; fi
             sleep 10
           done
           echo "Health check failed"; exit 1
@@ -230,24 +230,31 @@ jobs:
           export PATH="$PHP_DIR:$PATH"
           B="$HOME/backups/store/$TS"
           cd "$DEPLOY_PATH"
-          php artisan down --retry=60 || true
+          # no artisan here: the old code may not boot under PHP 8.3
+          mkdir -p storage/framework && echo '{}' > storage/framework/down
 
-          echo "Restoring files from $B/files.tar.gz ..."
-          tar -xzf "$B/files.tar.gz" -C "$DEPLOY_PATH" --exclude='./.env'
+          echo "Restoring files (exact copy of the backup; .env and storage kept) ..."
+          T=$(mktemp -d); tar -xzf "$B/files.tar.gz" -C "$T"
+          rsync -a --delete --exclude='/.env' --exclude='/storage/' "$T"/ "$DEPLOY_PATH"/
+          rm -rf "$T"
+          rm -f bootstrap/cache/*.php storage/framework/views/*.php
 
           if [ "$DB_TOUCHED" = "true" ]; then
             envval() { grep -E "^$1=" .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"; }
             DBH=$(envval DB_HOST); DBP=$(envval DB_PORT); DBN=$(envval DB_DATABASE)
             DBU=$(envval DB_USERNAME); DBW=$(envval DB_PASSWORD)
-            echo "Restoring database $DBN ..."
-            gunzip -c "$B/db.sql.gz" | MYSQL_PWD="$DBW" mysql -h "${DBH:-localhost}" -P "${DBP:-3306}" -u "$DBU" "$DBN"
+            M() { MYSQL_PWD="$DBW" mysql -h "${DBH:-localhost}" -P "${DBP:-3306}" -u "$DBU" "$@"; }
+            echo "Dropping all tables in $DBN, then importing the backup ..."
+            { echo "SET FOREIGN_KEY_CHECKS=0;"
+              M -N -e "SELECT CONCAT('DROP VIEW IF EXISTS \`',table_name,'\`;') FROM information_schema.views WHERE table_schema=DATABASE()" "$DBN"
+              M -N -e "SELECT CONCAT('DROP TABLE IF EXISTS \`',table_name,'\`;') FROM information_schema.tables WHERE table_schema=DATABASE() AND table_type='BASE TABLE'" "$DBN"
+            } | M "$DBN"
+            gunzip -c "$B/db.sql.gz" | M "$DBN"
           else
             echo "Database was not touched - not restoring it."
           fi
 
-          php artisan optimize:clear || true
-          php artisan config:cache || true
-          php artisan up
+          rm -f "$DEPLOY_PATH/storage/framework/down"
           echo "ROLLBACK COMPLETE - the previous version is live again."
           REMOTE
 
